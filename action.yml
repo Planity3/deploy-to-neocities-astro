@@ -1,35 +1,148 @@
-name: 'Deploy to Neocities'
-description: 'Efficiently deploy a folder to Neocities.org'
-branding:
-  icon: aperture
-  color: orange
-inputs:
-  api_key:  # api token for site to deploy to
-    description: 'Neocities API key for site to deploy to'
-    required: true
-  dist_dir:
-    description: 'Local folder to deploy to neocities'
-    default: 'public'
-    required: true
-  neocities_supporter:
-    description: 'Set to true if you are a Neocities supporter to bypass file type upload restrictions'
-    default: 'false'
-    required: true
-  cleanup:
-    description: Delete orphaned files on neocities that don't exist in distDir
-    default: 'false'
-    required: true
-  preview_before_deploy:
-    description: 'Set to true if you want to print deploy preview stats prior to deploying.'
-    default: 'true'
-    required: false
-  protected_files:
-    description: A glob string that prevents matched files from ever being deleted.
-    required: false
-  api_token:  # api token for site to deploy to
-    description: 'Neocities API key for site to deploy to'
-    required: false
-    deprecationMessage: 'api_token is deprecated, use api_key instead'
-runs:
-  using: 'node24'
-  main: 'dist/index.cjs'
+name: Build Astro and Deploy to Neocities
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-neocities
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --------------------------------
+      # Detect package manager
+      # --------------------------------
+
+      - name: Check lockfiles
+        shell: bash
+        env:
+          INPUT_PM: ""
+        run: |
+          if [ -n "$INPUT_PM" ]; then
+            PACKAGE_MANAGER=$(echo "$INPUT_PM" | grep -o '^[^@]*')
+            VERSION=$(echo "$INPUT_PM" | { grep -o '@.*' || true; } | sed 's/^@//')
+
+            if [ -z "$VERSION" ]; then
+              VERSION="latest"
+            fi
+
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PACKAGE_MANAGER="pnpm"
+            VERSION="latest"
+            LOCKFILE="pnpm-lock.yaml"
+
+          elif [ -f "yarn.lock" ]; then
+            PACKAGE_MANAGER="yarn"
+            VERSION="latest"
+            LOCKFILE="yarn.lock"
+
+          elif [ -f "package-lock.json" ]; then
+            PACKAGE_MANAGER="npm"
+            VERSION="latest"
+            LOCKFILE="package-lock.json"
+
+          elif [ -f "bun.lock" ]; then
+            PACKAGE_MANAGER="bun"
+            VERSION="latest"
+            LOCKFILE="bun.lock"
+
+          elif [ -f "bun.lockb" ]; then
+            PACKAGE_MANAGER="bun"
+            VERSION="latest"
+            LOCKFILE="bun.lockb"
+
+          else
+            echo "No supported lockfile found."
+            exit 1
+          fi
+
+          echo "PACKAGE_MANAGER=$PACKAGE_MANAGER" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "LOCKFILE=$LOCKFILE" >> "$GITHUB_ENV"
+
+      # --------------------------------
+      # Set up package manager
+      # --------------------------------
+
+      - name: Setup PNPM
+        if: env.PACKAGE_MANAGER == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.VERSION }}
+
+      - name: Setup Bun
+        if: env.PACKAGE_MANAGER == 'bun'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.VERSION }}
+
+      - name: Setup Node
+        if: env.PACKAGE_MANAGER != 'bun'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: ${{ env.PACKAGE_MANAGER }}
+          cache-dependency-path: ${{ env.LOCKFILE }}
+
+      # --------------------------------
+      # Install dependencies
+      # --------------------------------
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          if [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+            pnpm install --frozen-lockfile
+
+          elif [ "$PACKAGE_MANAGER" = "yarn" ]; then
+            yarn install --frozen-lockfile
+
+          elif [ "$PACKAGE_MANAGER" = "npm" ]; then
+            npm ci
+
+          elif [ "$PACKAGE_MANAGER" = "bun" ]; then
+            bun install --frozen-lockfile
+          fi
+
+      # --------------------------------
+      # Build Astro
+      # --------------------------------
+
+      - name: Build Astro
+        shell: bash
+        run: |
+          if [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+            pnpm run build
+
+          elif [ "$PACKAGE_MANAGER" = "yarn" ]; then
+            yarn build
+
+          elif [ "$PACKAGE_MANAGER" = "npm" ]; then
+            npm run build
+
+          elif [ "$PACKAGE_MANAGER" = "bun" ]; then
+            bun run build
+          fi
+
+      # --------------------------------
+      # Deploy dist/ to Neocities
+      # --------------------------------
+
+      - name: Deploy to Neocities
+        uses: bcomnes/deploy-to-neocities@v3
+        with:
+          api_key: ${{ secrets.NEOCITIES_API_TOKEN }}
+          cleanup: true
+          preview_before_deploy: false
+          dist_dir: 'dist'
